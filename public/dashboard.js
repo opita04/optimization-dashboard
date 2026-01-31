@@ -1,8 +1,11 @@
 let allData = [];
 let filteredData = [];
+let standardRows = [];
+let renkoRows = [];
 let charts = {};
 let sortDirection = {};
 let filters = { type: 'all', symbol: 'all', strategy: 'all' };
+let activeView = 'standard';
 
 async function loadData() {
     try {
@@ -10,11 +13,13 @@ async function loadData() {
         const response = await fetch('/api/results');
         allData = await response.json();
         filteredData = [...allData];
+        splitData();
         
         buildFilters();
         updateSummaryCards();
         updateCharts();
         updateTable();
+        updateRenkoView();
         
         document.getElementById('lastUpdate').textContent = 
             `Last updated: ${new Date().toLocaleString()} | ${allData.length} total results loaded`;
@@ -69,13 +74,15 @@ function applyFilters() {
         return true;
     });
     
+    splitData();
     updateSummaryCards();
     updateCharts();
     updateTable();
+    updateRenkoView();
 }
 
 function updateSummaryCards() {
-    const data = filteredData;
+    const data = standardRows;
     const total = data.length;
     if (total === 0) {
         document.getElementById('totalConfigs').textContent = '0';
@@ -98,7 +105,7 @@ function updateSummaryCards() {
 }
 
 function updateCharts() {
-    const data = filteredData;
+    const data = standardRows;
     Object.values(charts).forEach(chart => chart.destroy());
     charts = {};
     
@@ -255,7 +262,7 @@ function updateTable() {
     const tbody = document.getElementById('resultsBody');
     tbody.innerHTML = '';
     
-    filteredData.forEach(d => {
+    standardRows.forEach(d => {
         const row = document.createElement('tr');
         const profit = d.net_profit || 0;
         const profitClass = profit >= 0 ? 'positive' : 'negative';
@@ -301,3 +308,173 @@ function sortTable(colIndex) {
 }
 
 document.addEventListener('DOMContentLoaded', loadData);
+
+function splitData() {
+    renkoRows = filteredData.filter(isRenkoAnalysisRow);
+    standardRows = filteredData.filter(d => !isRenkoAnalysisRow(d));
+    if (renkoRows.length && !standardRows.length) {
+        activeView = 'renko';
+    } else if (!renkoRows.length) {
+        activeView = 'standard';
+    }
+}
+
+function isRenkoAnalysisRow(row) {
+    return row && (row.zone_stats || (row.zone !== undefined && row.up_ratio !== undefined && row.chi2 !== undefined));
+}
+
+function ensureRenkoUI() {
+    const standardTable = document.getElementById('resultsTable') || document.getElementById('resultsBody')?.closest('table');
+    if (!standardTable) return null;
+
+    const container = standardTable.closest('.table-container') || standardTable.parentElement;
+    if (!container) return null;
+
+    let tabs = document.getElementById('resultsTabs');
+    if (!tabs) {
+        tabs = document.createElement('div');
+        tabs.id = 'resultsTabs';
+        tabs.style.display = 'flex';
+        tabs.style.gap = '8px';
+        tabs.style.marginBottom = '10px';
+
+        const standardBtn = document.createElement('button');
+        standardBtn.id = 'tabStandard';
+        standardBtn.textContent = 'Optimization Results';
+        standardBtn.onclick = () => switchView('standard');
+
+        const renkoBtn = document.createElement('button');
+        renkoBtn.id = 'tabRenko';
+        renkoBtn.textContent = 'Renko Analysis';
+        renkoBtn.onclick = () => switchView('renko');
+
+        [standardBtn, renkoBtn].forEach(btn => {
+            btn.style.background = '#161b22';
+            btn.style.color = '#c9d1d9';
+            btn.style.border = '1px solid #30363d';
+            btn.style.padding = '6px 12px';
+            btn.style.borderRadius = '6px';
+            btn.style.cursor = 'pointer';
+            btn.style.fontSize = '12px';
+        });
+
+        tabs.appendChild(standardBtn);
+        tabs.appendChild(renkoBtn);
+        container.insertBefore(tabs, container.firstChild);
+    }
+
+    let renkoSummary = document.getElementById('renkoSummary');
+    if (!renkoSummary) {
+        renkoSummary = document.createElement('div');
+        renkoSummary.id = 'renkoSummary';
+        renkoSummary.style.margin = '8px 0 12px';
+        renkoSummary.style.color = '#8b949e';
+        renkoSummary.style.fontSize = '12px';
+        container.insertBefore(renkoSummary, standardTable);
+    }
+
+    let renkoTable = document.getElementById('renkoTable');
+    if (!renkoTable) {
+        renkoTable = document.createElement('table');
+        renkoTable.id = 'renkoTable';
+        renkoTable.innerHTML = `
+            <thead>
+                <tr>
+                    <th>Symbol</th>
+                    <th>Block</th>
+                    <th>EMA Fast</th>
+                    <th>EMA Med</th>
+                    <th>EMA Slow</th>
+                    <th>Zone</th>
+                    <th>Total</th>
+                    <th>Up</th>
+                    <th>Down</th>
+                    <th>Up Ratio</th>
+                    <th>Down Ratio</th>
+                    <th>Chi2</th>
+                    <th>p-value</th>
+                    <th>Significant</th>
+                    <th>Summary</th>
+                </tr>
+            </thead>
+            <tbody id="renkoBody"></tbody>
+        `;
+        container.appendChild(renkoTable);
+    }
+
+    return { standardTable, renkoTable, renkoSummary };
+}
+
+function updateRenkoView() {
+    const ui = ensureRenkoUI();
+    if (!ui) return;
+
+    const { standardTable, renkoTable, renkoSummary } = ui;
+    const hasRenko = renkoRows.length > 0;
+
+    document.getElementById('resultsTabs').style.display = hasRenko ? 'flex' : 'none';
+    document.getElementById('tabStandard').style.background = activeView === 'standard' ? '#238636' : '#161b22';
+    document.getElementById('tabRenko').style.background = activeView === 'renko' ? '#238636' : '#161b22';
+
+    standardTable.style.display = activeView === 'standard' ? '' : 'none';
+    renkoTable.style.display = activeView === 'renko' && hasRenko ? '' : 'none';
+    renkoSummary.style.display = activeView === 'renko' && hasRenko ? '' : 'none';
+
+    if (!hasRenko) return;
+
+    const significantCount = renkoRows.filter(r => r.significant).length;
+    const avgUpRatio = averageRatio(renkoRows.map(r => r.up_ratio));
+    const avgDownRatio = averageRatio(renkoRows.map(r => r.down_ratio));
+
+    renkoSummary.textContent = `Renko rows: ${renkoRows.length} | Significant: ${significantCount} | Avg Up Ratio: ${avgUpRatio} | Avg Down Ratio: ${avgDownRatio}`;
+
+    const tbody = document.getElementById('renkoBody');
+    tbody.innerHTML = renkoRows.map(r => {
+        return `<tr>
+            <td>${r.symbol || r.asset || '-'}</td>
+            <td>${r.block_size ?? '-'}</td>
+            <td>${r.ema_fast ?? '-'}</td>
+            <td>${r.ema_medium ?? '-'}</td>
+            <td>${r.ema_slow ?? '-'}</td>
+            <td>${r.zone ?? '-'}</td>
+            <td>${r.total ?? '-'}</td>
+            <td>${r.up ?? '-'}</td>
+            <td>${r.down ?? '-'}</td>
+            <td>${formatRatio(r.up_ratio)}</td>
+            <td>${formatRatio(r.down_ratio)}</td>
+            <td>${formatNumber(r.chi2, 2)}</td>
+            <td>${formatNumber(r.p_value, 4)}</td>
+            <td>${r.significant ? 'Yes' : 'No'}</td>
+            <td>${r.zone_stats || '-'}</td>
+        </tr>`;
+    }).join('');
+}
+
+function switchView(mode) {
+    activeView = mode;
+    updateRenkoView();
+}
+
+function formatRatio(value) {
+    if (value === null || value === undefined || value === '' || Number.isNaN(value)) return '-';
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return String(value);
+    const pct = numeric <= 1 ? numeric * 100 : numeric;
+    return pct.toFixed(1) + '%';
+}
+
+function formatNumber(value, decimals) {
+    if (value === null || value === undefined || value === '' || Number.isNaN(value)) return '-';
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return String(value);
+    return numeric.toFixed(decimals);
+}
+
+function averageRatio(values) {
+    const nums = values
+        .map(v => Number(v))
+        .filter(v => Number.isFinite(v));
+    if (!nums.length) return '-';
+    const avg = nums.reduce((a, b) => a + b, 0) / nums.length;
+    return formatRatio(avg);
+}
